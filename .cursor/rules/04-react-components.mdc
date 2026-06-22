@@ -1,0 +1,46 @@
+---
+description: "Regras para componentes React no SEI-Perceptio"
+globs: ["src/**/*.tsx"]
+---
+
+# React Component Rules
+
+## Server vs Client Components
+- DEFAULT to server components (sem 'use client')
+- Add `"use client"` ONLY for: interactivity, browser APIs, hooks, event handlers
+- NEVER import server-only code in client components
+- Use server actions for mutations (actions.ts files)
+- Fetch data in server components, NEVER in useEffect
+- Pass data down as props, not through context
+
+## Component Pattern (OBRIGATÓRIO)
+```tsx
+// 1. Imports
+import { cn } from '@/lib/utils';
+import { type ReactNode } from 'react';
+
+// 2. Props interface (acima do componente)
+interface ChatPanelProps {
+  className?: string;
+  notebookId: string;
+  children?: ReactNode;
+}
+
+// 3. Component function (named export)
+export function ChatPanel({ className, notebookId, children }: ChatPanelProps) {
+  return (
+    <div className={cn('base-classes', className)}>
+      {children}
+    </div>
+  );
+}
+```
+
+## Regras de Estilo
+- Tailwind CSS para TODO o styling (NO CSS modules, NO inline styles, NO styled-components)
+- Usar `cn()` utility (clsx + tailwind-merge) para classes condicionais em TODOS os componentes
+- Props interface definida acima do componente
+- Nome: `[ComponentName]Props`
+- Usar `forwardRef` quando o componente envolve um DOM element
+- Extrair subcomponentes quando passar de 150 linhas
+- Usar `React.memo` apenas quando profiling mostrar necessidade

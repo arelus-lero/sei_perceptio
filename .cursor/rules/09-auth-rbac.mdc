@@ -1,0 +1,30 @@
+---
+description: "Autenticação, autorização, RBAC e middleware do SEI-Perceptio"
+---
+
+# Auth & RBAC Rules
+
+## Fluxo de Autenticação
+```
+Login → Supabase Auth → JWT (app_metadata.role + app_metadata.orgao_id)
+  → Cookie httpOnly (supabase-auth-token)
+  → Middleware Next.js valida JWT em cada request
+  → API Routes recebem orgao_id e role via header
+  → RLS no PostgreSQL usa orgao_id e role do JWT
+```
+
+## Perfis RBAC
+| Role | Permissões |
+|------|-----------|
+| `admin` | CRUD completo. Gestão usuários, retenção, auditoria, config anonimização. |
+| `analista` | Criar/editar notebooks próprios. Upload fontes. Consultas RAG. Monitoramento. Exportação. |
+| `consultor` | Leitura notebooks compartilhados. Consultas RAG. Sem upload, sem exportação. |
+
+## Middleware (`src/middleware.ts`)
+- Rotas públicas: `/login`, `/callback`, `/api/auth/[...supabase]`
+- Rotas protegidas: tudo demais
+- Refresh token se necessário
+- Extrair orgao_id e role do JWT app_metadata
+- Se não autenticado → redirect `/login`
+- Se role não tem acesso à rota → redirect `/dashboard`
+- Injetar `x-orgao-id` e `x-user-role` nos request headers

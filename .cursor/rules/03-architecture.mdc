@@ -1,0 +1,76 @@
+---
+description: "Estrutura de diretórios, nomenclatura e organização do projeto SEI-Perceptio"
+alwaysApply: true
+---
+
+# Arquitetura do Projeto
+
+## Estrutura de Diretórios (OBRIGATÓRIO seguir)
+
+```
+src/
+├── app/                    # Next.js App Router (exclusivo)
+│   ├── layout.tsx          # Layout raiz
+│   ├── page.tsx            # Landing / redirect
+│   ├── globals.css         # Estilos globais + Tailwind
+│   ├── (auth)/             # Grupo: login, callback
+│   ├── (dashboard)/        # Grupo: autenticado
+│   │   ├── layout.tsx      # Sidebar + Header
+│   │   ├── dashboard/page.tsx
+│   │   ├── notebooks/      # CRUD notebooks + chat
+│   │   ├── processos/      # Lista + detalhe + timeline
+│   │   ├── monitoramento/page.tsx
+│   │   ├── relacoes/page.tsx
+│   │   └── admin/          # RBAC, retenção, auditoria
+│   └── api/                # API Routes (Route Handlers)
+│       ├── auth/[...supabase]/route.ts
+│       ├── chat/route.ts           # SSE streaming RAG
+│       ├── embed/route.ts          # Proxy Edge Function
+│       ├── ingest/
+│       ├── notebooks/
+│       ├── processos/
+│       ├── alertas/
+│       ├── relacoes/
+│       ├── relatorios/
+│       └── admin/
+├── components/
+│   ├── ui/                 # shadcn/ui components (CLI gerados)
+│   ├── layout/             # Sidebar, Header, MobileNav
+│   ├── chat/               # ChatPanel, MessageBubble, CitationCard
+│   ├── notebook/           # NotebookCard, SourceList, SourceUpload
+│   ├── processo/           # ProcessoCard, AndamentoList, TimelineChart
+│   ├── dashboard/          # StatsCards, StatusChart, PrazosList
+│   ├── monitoring/         # AlertItem, AlertBadge
+│   └── governance/         # AiBadge, AuditLogTable
+├── lib/
+│   ├── supabase/           # Client browser, Server, Middleware, Admin
+│   ├── db/                 # Drizzle schema + queries
+│   ├── rag/                # Chunking, Embedding, Retrieval, Generation, Verification
+│   ├── ingestion/          # PDF, DOCX, OCR, Metadata, Anonymizer, Deduplication
+│   ├── auth/               # Middleware, RBAC, Constants
+│   ├── realtime/           # Supabase Realtime subscriptions
+│   └── utils/              # cn(), validators, formatters
+├── hooks/                  # useAuth, useChat, useNotebook, useMonitoring, useSources
+├── types/                  # Database, Chat, Processo, API types
+└── middleware.ts           # Next.js middleware (auth guard + headers)
+```
+
+## Convenções de Nomenclatura
+
+| Aspecto | Padrão |
+|---------|--------|
+| Arquivos | kebab-case: `chat-panel.tsx`, `use-chat.ts` |
+| Componentes React | PascalCase: `ChatPanel`, `SourceSelector` |
+| Hooks | camelCase com prefixo `use`: `useChat`, `useNotebook` |
+| Funções | camelCase |
+| Constantes | UPPER_SNAKE_CASE |
+| Tipos/Interfaces | PascalCase |
+| Tabelas SQL | snake_case, singular: `processo`, `andamento` |
+| Colunas SQL | snake_case: `data_geracao`, `tipo_documento_codigo` |
+| Exportações | Named exports (default APENAS para page.tsx) |
+
+## Import Aliases
+- `@/components/ui/<name>` → shadcn/ui
+- `@/lib/<module>` → lib
+- `@/hooks/<name>` → hooks
+- `@/` → `src/`

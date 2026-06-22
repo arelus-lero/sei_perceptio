@@ -1,0 +1,26 @@
+$ next build
+▲ Next.js 16.2.9 (Turbopack)
+- Environments: .env.local
+
+  Creating an optimized production build ...
+(node:14093) [MODULE_TYPELESS_PACKAGE_JSON] Warning: Module type of file:///home/lero/sei_perceptio/tailwind.config.ts?id=1782078183905 is not specified and it doesn't parse as CommonJS.
+Reparsing as ES module because module syntax was detected. This incurs a performance overhead.
+To eliminate this warning, add "type": "module" to /home/lero/sei_perceptio/package.json.
+(Use `node --trace-warnings ...` to show where the warning was created)
+✓ Compiled successfully in 28.3s
+  Running TypeScript ...
+Failed to type check.
+
+./src/app/api/fontes/[id]/tags/route.ts:61:27
+Type error: A type predicate's type must be assignable to its parameter's type.
+  Type 'TagItem' is missing the following properties from type '{ id: any; nome: any; cor: any; created_at: any; }[]': length, pop, push, concat, and 35 more.
+
+  [90m59 |[0m   [36mconst[0m tags: [33mTagItem[0m[] = (data ?? [])
+  [90m60 |[0m     .map((row) => row.tag)
+[31m[1m>[0m [90m61 |[0m     .filter((tag): tag is [33mTagItem[0m => [33mBoolean[0m(tag))
+  [90m   |[0m                           [31m[1m^[0m
+  [90m62 |[0m     .map((tag) => mapTagRow(tag));
+  [90m63 |[0m
+  [90m64 |[0m   [36mreturn[0m [33mNextResponse[0m.json({ tags }, { status: [35m200[0m });
+Next.js build worker exited with code: 1 and signal: null
+[ELIFECYCLE] Command failed with exit code 1.

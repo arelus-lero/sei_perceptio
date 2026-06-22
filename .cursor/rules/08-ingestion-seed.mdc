@@ -1,0 +1,42 @@
+---
+description: "Pipeline de ingestão de documentos, seed data e processos SEI"
+---
+
+# Ingestion & Seed Rules
+
+## Pipeline Assíncrono (via Inngest)
+1. Salvar arquivo no Supabase Storage (bucket `documentos`)
+2. Calcular checksum (sha256)
+3. Se PDF digitalizado → OCR via Tesseract.js
+4. Extrair metadados SEI (NUP, tipo, unidade)
+5. Anonimizar PII (Presidio): CPF, CNPJ, EMAIL, TELEFONE, ENDERECO, DADOS_BANCARIOS, DADOS_SENSIVEIS
+6. Verificar duplicata (simhash/jaccard > 80%)
+7. Chunking semântico (512 tokens, overlap 200)
+8. Gerar embeddings via Edge Function
+9. Inserir chunks com vetores no PostgreSQL
+10. Atualizar status da fonte para `pronto`
+
+## Tipos de Arquivo Suportados
+PDF, DOCX, TXT, MD, XLSX, PPTX, JPG, PNG, TIFF, MP3, WAV
+
+## Modos de Anonimização
+- `mask` | `redact` | `remove` (configurável via env)
+
+## Requisitos do Script de Seed
+- Usar service_role key (bypass RLS)
+- Ser IDEMPOTENTE: usar UPSERT (INSERT ... ON CONFLICT DO UPDATE)
+- Cobrir 5 cenários: tramitação múltipla, concluído completo, consulta pública + prorrogações, anexados (pai-filho), distribuição/relatoria
+- Mínimo 200 processos
+- NUP formato: `48500.NNNNNN/AAAA-NN` (prefixo ANEEL)
+- 5-20 documentos com conteudo_texto realista por processo
+- 10-50 andamentos por processo
+- 0-3 prorrogações por consulta pública
+
+## Validação NUP
+```typescript
+const NUP_REGEX = /^(\d{5})\.(\d{6})\/(\d{4})-(\d{2})$/;
+// Grupo 1: prefixo (48500 = ANEEL)
+// Grupo 2: número sequencial
+// Grupo 3: ano
+// Grupo 4: DV (módulo 11)
+```

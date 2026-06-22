@@ -1,0 +1,63 @@
+---
+description: "Roadmap de implementação por fases e checklist de verificação pós-código"
+---
+
+# Roadmap & Verification Checklist
+
+## Fase 1 — MVP (implementar nesta ordem)
+1. `npx create-next-app@latest sei-perceptio --typescript --tailwind --app --src-dir`
+2. `npx shadcn@latest init` + instalar componentes
+3. Configurar Supabase: `npx supabase init` + criar projeto
+4. Executar migrations: schema + RLS + indexes
+5. Criar Edge Function `embed`
+6. Implementar `src/lib/supabase/client.ts` + `server.ts`
+7. Implementar middleware de autenticação
+8. Implementar telas: login, dashboard, notebook CRUD, chat
+9. Implementar RAG pipeline: chunking → embedding → retrieval → generation
+10. Implementar citação de fontes + indicador de confiança
+11. Implementar upload de documentos básico
+
+## Fase 2 — Inteligência SEI
+12. Seed data (200+ processos)
+13. Pipeline completa: OCR, metadados, anonimização, deduplicação
+14. Monitoramento + alertas in-app (Realtime)
+15. Tags e filtros avançados
+16. Templates de prompt
+
+## Fase 3 — Análise Avançada
+17. Dashboard com gráficos (Recharts)
+18. Linha do tempo interativa
+19. Grafo de relações (ReactFlow)
+20. Geração de relatórios e sínteses
+21. Análise SLA e prazos
+22. Exportação de notebooks
+
+## Fase 4 — Governança
+23. RBAC completo
+25. Logs de auditoria
+26. Políticas de retenção
+27. Compartilhamento
+28. Conformidade LGPD
+
+## Fase 5 — Inovação
+29. Geração de áudio
+30. Modelo nacional PBIA (embeddings)
+31. LLM soberano PBIA
+32. API Routes públicas
+
+## Checklist Pós-Implementação (verificar em TODO arquivo)
+- [ ] Inputs validados com Zod?
+- [ ] `createServerClient` usado nas API Routes?
+- [ ] `createBrowserClient` usado nos componentes client?
+- [ ] `orgao_id` verificado do JWT em queries server-side?
+- [ ] Streaming (ReadableStream/SSE) usado para respostas do chat?
+- [ ] `cn()` incluído em todos os componentes?
+- [ ] Named exports usados (exceto pages)?
+- [ ] Erros tratados com try/catch e status codes HTTP adequados?
+- [ ] Selo de IA presente em todas as respostas do chat?
+- [ ] RLS habilitado em novas tabelas?
+- [ ] NUNCA `any` type em TypeScript?
+- [ ] NUNCA service_role no client-side?
+- [ ] NUNCA tabelas adicionais sem approval?
+- [ ] NUNCA ORM diferente de Drizzle?
+- [ ] NUNCA API externa para embeddings?

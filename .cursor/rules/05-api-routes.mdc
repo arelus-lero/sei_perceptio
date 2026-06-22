@@ -1,0 +1,64 @@
+---
+description: "Regras para API Routes (Route Handlers) no Next.js App Router"
+globs: ["src/app/api/**/*.ts"]
+---
+
+# API Route Rules
+
+## Padrão OBRIGATÓRIO para toda API Route
+```typescript
+import { NextRequest, NextResponse } from 'next/server';
+import { createServerClient } from '@/lib/supabase/server';
+import { z } from 'zod';
+
+// 1. Schema Zod de validação
+const RequestSchema = z.object({
+  notebook_id: z.string().uuid(),
+  mensagem: z.string().min(1).max(5000),
+});
+
+// 2. POST handler
+export async function POST(request: NextRequest) {
+  try {
+    // 2a. Obter user do Supabase Auth
+    const supabase = createServerClient();
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+    // 2b. Obter orgao_id e role do header injetado pelo middleware
+    const orgaoId = request.headers.get('x-orgao-id');
+    const userRole = request.headers.get('x-user-role');
+
+    // 2c. Validar body com Zod
+    const body = await request.json();
+    const validated = RequestSchema.parse(body);
+
+    // 2d. Lógica de negócio
+    // ...
+
+    // 2e. Retornar Response
+    return NextResponse.json({ data: result }, { status: 200 });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return NextResponse.json({ error: error.errors }, { status: 400 });
+    }
+    console.error('API Error:', error);
+    return NextResponse.json({ error: 'Internal Server Error' }, { status: 500 });
+  }
+}
+```
+
+## Regras de Segurança
+- TODOS os endpoints (exceto login/callback) requerem autenticação JWT
+- Middleware Next.js deve: validar JWT, extrair orgao_id/role, injetar nos headers
+- Verificar `orgao_id` do JWT em TODAS as queries server-side
+- Usar `createServerClient` (SSR) nas API Routes
+- Usar `createBrowserClient` nos componentes client-side
+- NUNCA usar service_role no client-side
+- NUNCA omitir políticas RLS — todas as tabelas têm RLS habilitado
+
+## Streaming SSE (Chat RAG)
+- Usar `ReadableStream` para SSE
+- Content-Type: `text/event-stream`
+- Tipos de evento: `token`, `citation`, `confidence`, `done`
+- Header obrigatório: `X-IA-Declaration`

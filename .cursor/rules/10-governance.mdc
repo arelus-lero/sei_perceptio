@@ -1,0 +1,37 @@
+---
+description: "Governança, LGPD, auditoria, retenção e conformidade normativa"
+---
+
+# Governance & LGPD Rules
+
+## Requisitos Não-Funcionais (RNF)
+- Chat response time (P95): ≤ 15s
+- Ingestão 100pg PDF: ≤ 60s
+- Indexação 2000 páginas: ≤ 5min
+- Query 500 processos: ≤ 3s
+- Usuários simultâneos: ≥ 100
+- TLS 1.3
+- Criptografia repouso: AES-256
+- Residência dados: Brasil (sa-east-1)
+- Sessão: 30min timeout, refresh rotativo
+- Sanitização: Anti prompt-injection (Zod + sanitização inputs)
+- Isolamento multi-tenant: RLS por orgao_id
+- Uptime: ≥ 99.5%
+- Backup: Diário automático
+- RTO/RPO: 4h / 1h
+
+## LGPD / Governança
+- Anonimização obrigatória (RF-006)
+- Políticas de retenção (RF-043)
+- Selo de IA obrigatório (RF-039)
+- Audit_log imutável (INSERT only)
+- RBAC completo
+- Bloqueio processos sigilosos
+
+## Referências Normativas
+- LGPD (Lei 13.709/2018): Anonimização, retenção
+- Portaria MGI nº 3.485/2026: Selo de IA, supervisão humana
+- Lei 14.133/2021: Templates licitatórios
+- PBIA: Modelo nacional embeddings/LLM (Fase 5)
+- IN SGD/ME nº 1/2019: Templates prompt, contratação TIC
+- e-PING: Interoperabilidade

@@ -1,0 +1,46 @@
+---
+description: "Regras de banco de dados, Drizzle ORM, RLS e schema do SEI-Perceptio"
+---
+
+# Database Rules
+
+## Schema Drizzle DEVE espelhar fielmente o SQL DDL
+- Usar `pgTable` para tabelas
+- Usar `uuid`, `text`, `integer`, `boolean`, `jsonb`, `timestamp`, `date`, `vector` para colunas
+- Usar `pgVector` para coluna de embedding (384 dimensões)
+- Definir Relations com `.references()`
+- Gerar tipos: `npx drizzle-kit generate`
+
+## Tabelas Principais (NUNCA criar tabelas adicionais sem approval)
+- `orgao` (tenant)
+- `perfil` (RBAC: admin, analista, consultor)
+- `processo` (NUP, status, unidade, classificação, sigiloso)
+- `documento` (numero_sei, conteudo_texto, checksum)
+- `andamento` (tramitação, distribuição, relatoria)
+- `anexacao` (pai-filho)
+- `consulta_publica` + `prorrogacao_cp`
+- `notebook` + `fonte` + `chunk` (vetores 384d)
+- `conversa` + `mensagem` (chat history)
+- `tag` + `fonte_tag` (N:N)
+- `compartilhamento` (leitura, comentario, edicao)
+- `monitoramento` + `alerta`
+- `audit_log` (INSERT only, imutável)
+- `snapshot_processo` (versionamento)
+- `politica_retensao` (LGPD)
+- `seed_job` (execução seed)
+
+## Row-Level Security (RLS) — REGRAS CRÍTICAS
+- ATIVAR RLS em TODAS as tabelas
+- Padrão: usuário só vê dados do seu `orgao_id`
+- Admin vê tudo do órgão. Consultor só lê.
+- Notebook: dono ou compartilhado
+- Fonte/Chunk: via notebook acessível
+- Mensagem: via conversa → notebook acessível
+- Monitoramento/Alerta: próprio usuário
+- Audit log: admin vê tudo, outros veem próprio
+- Seed job: acesso exclusivo via service_role (bypass RLS)
+
+## Bloqueio de Processos Sigilosos (RF-042)
+- Na aplicação, verificar antes da ingestão:
+- `if (processo.tipo_processo_codigo === '100001101')` → bloquear
+- A menos que exista exceção configurada pelo DPO
