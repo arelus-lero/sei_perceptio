@@ -1,3 +1,4 @@
+import { buildLlmRequestBody } from '@/lib/rag/generation';
 import { createAdminClient } from '@/lib/supabase/admin';
 import type { HealthCheckResult } from '@/types/health';
 
@@ -141,6 +142,12 @@ export async function checkLlm(): Promise<HealthCheckResult> {
   }, timeoutMs);
 
   try {
+    const requestBody = buildLlmRequestBody(
+      model,
+      [{ role: 'user', content: 'ping' }],
+      false,
+    );
+
     const response = await fetch(apiUrl, {
       method: 'POST',
       headers: {
@@ -148,8 +155,7 @@ export async function checkLlm(): Promise<HealthCheckResult> {
         Authorization: `Bearer ${apiKey}`,
       },
       body: JSON.stringify({
-        model,
-        messages: [{ role: 'user', content: 'ping' }],
+        ...requestBody,
         max_tokens: 1,
         stream: false,
       }),

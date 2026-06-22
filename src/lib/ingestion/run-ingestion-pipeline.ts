@@ -1,6 +1,7 @@
 import 'server-only';
 
 import type { SupabaseClient } from '@supabase/supabase-js';
+import pLimit from 'p-limit';
 
 import { assertUploadNotDuplicate } from '@/lib/dedup/check-upload-duplicates';
 import { SimilarContentError } from '@/lib/dedup/dedup-errors';
@@ -13,8 +14,15 @@ import { extractSeiMetadata } from '@/lib/ingestion/metadata-extractor';
 import { assertSigiloIngestionAllowed } from '@/lib/ingestion/sigilo-guard';
 import { UploadPipelineError } from '@/lib/ingestion/upload-pipeline-error';
 import { createRequestLogger, logError } from '@/lib/logger';
-import { embedAndPersistChunks } from '@/lib/ingestion/chunk-embedding-index';
+import type { Chunk } from '@/lib/rag/chunking';
 import { chunkText } from '@/lib/rag/chunking';
+import {
+  buildBatches,
+  embedBatchWithRetry,
+  EmbedError,
+  type EmbedErrorCode,
+  embeddingToPgVector,
+} from '@/lib/rag/embedding';
 import type {
   FonteIngestionStatus,
   IngestionJobStage,
@@ -37,6 +45,245 @@ interface FonteRow {
   titulo: string;
   metadados_json: Record<string, unknown> | null;
   checksum: string | null;
+}
+
+const EMBED_CONCURRENCY = 4;
+
+interface EmbedAndPersistResult {
+  chunksIndexed: number;
+  embeddingAvailable: boolean;
+  embeddingError: string | null;
+  embeddingErrorCode: EmbedErrorCode | null;
+  embeddingRetryable: boolean;
+}
+
+interface StoredChunkRow {
+  id: string;
+  conteudo: string;
+  posicao_inicio: number;
+  posicao_fim: number;
+  metadados_json: Record<string, unknown>;
+}
+
+function resolveEmbedFailure(error: unknown): {
+  message: string;
+  code: EmbedErrorCode;
+  retryable: boolean;
+} {
+  if (error instanceof EmbedError) {
+    return {
+      message: error.message,
+      code: error.code,
+      retryable: error.code !== 'bad_dim',
+    };
+  }
+
+  return {
+    message: error instanceof Error ? error.message : 'Falha ao gerar embeddings',
+    code: 'failed',
+    retryable: true,
+  };
+}
+
+async function updateChunkEmbeddings(params: {
+  supabase: SupabaseClient;
+  chunkId: string;
+  orgaoId: string;
+  embedding: number[];
+  metadadosJson: Record<string, unknown>;
+}): Promise<void> {
+  const { error } = await params.supabase
+    .from('chunk')
+    .update({
+      embedding: embeddingToPgVector(params.embedding),
+      metadados_json: {
+        ...params.metadadosJson,
+        embedding_available: true,
+      },
+    })
+    .eq('id', params.chunkId)
+    .eq('orgao_id', params.orgaoId);
+
+  if (error) {
+    throw new Error(`Falha ao atualizar embedding do chunk ${params.chunkId}: ${error.message}`);
+  }
+}
+
+async function reembedExistingChunks(params: {
+  supabase: SupabaseClient;
+  fonteId: string;
+  orgaoId: string;
+}): Promise<EmbedAndPersistResult> {
+  const { data: rows, error: fetchError } = await params.supabase
+    .from('chunk')
+    .select('id, conteudo, posicao_inicio, posicao_fim, metadados_json')
+    .eq('fonte_id', params.fonteId)
+    .eq('orgao_id', params.orgaoId)
+    .order('posicao_inicio', { ascending: true });
+
+  if (fetchError) {
+    throw new Error(`Falha ao carregar chunks: ${fetchError.message}`);
+  }
+
+  const storedChunks = (rows ?? []) as StoredChunkRow[];
+
+  if (storedChunks.length === 0) {
+    throw new Error('Nenhum chunk persistido; use reprocessamento completo.');
+  }
+
+  const chunksForBatching: Chunk[] = storedChunks.map((row) => ({
+    conteudo: row.conteudo,
+    tokens:
+      typeof row.metadados_json.tokens === 'number'
+        ? row.metadados_json.tokens
+        : row.conteudo.length,
+    posicao_inicio: row.posicao_inicio,
+    posicao_fim: row.posicao_fim,
+    metadados: {
+      ...(row.metadados_json as unknown as Chunk['metadados']),
+      posicao_inicio: row.posicao_inicio,
+      posicao_fim: row.posicao_fim,
+    },
+  }));
+
+  const batches = buildBatches(chunksForBatching);
+  let cursor = 0;
+  let embeddingAvailable = true;
+  let embeddingError: string | null = null;
+  let embeddingErrorCode: EmbedErrorCode | null = null;
+
+  for (const batch of batches) {
+    const batchRows = storedChunks.slice(cursor, cursor + batch.length);
+
+    try {
+      const vectors = await embedBatchWithRetry(batch.map((chunk) => chunk.conteudo));
+
+      await Promise.all(
+        batchRows.map((row, index) =>
+          updateChunkEmbeddings({
+            supabase: params.supabase,
+            chunkId: row.id,
+            orgaoId: params.orgaoId,
+            embedding: vectors[index] as number[],
+            metadadosJson: row.metadados_json,
+          }),
+        ),
+      );
+    } catch (error) {
+      const failure = resolveEmbedFailure(error);
+      embeddingAvailable = false;
+      embeddingError = failure.message;
+      embeddingErrorCode = failure.code;
+
+      if (failure.code === 'bad_dim') {
+        break;
+      }
+    }
+
+    cursor += batch.length;
+  }
+
+  return {
+    chunksIndexed: storedChunks.length,
+    embeddingAvailable,
+    embeddingError,
+    embeddingErrorCode,
+    embeddingRetryable: embeddingErrorCode !== 'bad_dim',
+  };
+}
+
+async function persistChunks(params: {
+  supabase: SupabaseClient;
+  fonteId: string;
+  orgaoId: string;
+  batch: Chunk[];
+  embeddings: (number[] | null)[];
+  embeddingAvailable: boolean;
+}): Promise<void> {
+  const rows = params.batch.map((chunk, index) => ({
+    fonte_id: params.fonteId,
+    conteudo: chunk.conteudo,
+    posicao_inicio: chunk.posicao_inicio,
+    posicao_fim: chunk.posicao_fim,
+    embedding: params.embeddings[index]
+      ? embeddingToPgVector(params.embeddings[index] as number[])
+      : null,
+    metadados_json: {
+      ...chunk.metadados,
+      tokens: chunk.tokens,
+      embedding_available: params.embeddingAvailable,
+    },
+    orgao_id: params.orgaoId,
+  }));
+
+  const { error: chunkError } = await params.supabase.from('chunk').insert(rows);
+
+  if (chunkError) {
+    throw new Error(`Falha ao persistir chunks: ${chunkError.message}`);
+  }
+}
+
+async function embedAndPersistChunksStreaming(params: {
+  supabase: SupabaseClient;
+  fonteId: string;
+  orgaoId: string;
+  chunks: Chunk[];
+}): Promise<EmbedAndPersistResult> {
+  if (params.chunks.length === 0) {
+    return {
+      chunksIndexed: 0,
+      embeddingAvailable: true,
+      embeddingError: null,
+      embeddingErrorCode: null,
+      embeddingRetryable: true,
+    };
+  }
+
+  const limit = pLimit(EMBED_CONCURRENCY);
+  const batches = buildBatches(params.chunks);
+  let chunksIndexed = 0;
+  let embeddingAvailable = true;
+  let embeddingError: string | null = null;
+  let embeddingErrorCode: EmbedErrorCode | null = null;
+
+  await Promise.all(
+    batches.map((batch) =>
+      limit(async () => {
+        let embeddings: (number[] | null)[] = batch.map(() => null);
+        let batchEmbeddingAvailable = true;
+
+        try {
+          const vectors = await embedBatchWithRetry(batch.map((chunk) => chunk.conteudo));
+          embeddings = vectors;
+        } catch (error) {
+          batchEmbeddingAvailable = false;
+          embeddingAvailable = false;
+          const failure = resolveEmbedFailure(error);
+          embeddingError = failure.message;
+          embeddingErrorCode = failure.code;
+        }
+
+        await persistChunks({
+          supabase: params.supabase,
+          fonteId: params.fonteId,
+          orgaoId: params.orgaoId,
+          batch,
+          embeddings,
+          embeddingAvailable: batchEmbeddingAvailable,
+        });
+
+        chunksIndexed += batch.length;
+      }),
+    ),
+  );
+
+  return {
+    chunksIndexed,
+    embeddingAvailable,
+    embeddingError,
+    embeddingErrorCode,
+    embeddingRetryable: embeddingErrorCode !== 'bad_dim',
+  };
 }
 
 function readDedupFlags(metadados: Record<string, unknown> | null): {
@@ -327,6 +574,8 @@ export async function runIngestionPipeline(
     let chunksIndexed = 0;
     let embeddingAvailable = true;
     let embeddingError: string | null = null;
+    let embeddingErrorCode: EmbedErrorCode | null = null;
+    let embeddingRetryable = true;
 
     if (textoParaPersistir) {
       await updateIngestionJobState(
@@ -356,7 +605,7 @@ export async function runIngestionPipeline(
           { stage: 'indexing' },
         );
 
-        const indexResult = await embedAndPersistChunks({
+        const indexResult = await embedAndPersistChunksStreaming({
           supabase: params.supabase,
           fonteId: params.fonteId,
           orgaoId: params.orgaoId,
@@ -366,10 +615,16 @@ export async function runIngestionPipeline(
         chunksIndexed = indexResult.chunksIndexed;
         embeddingAvailable = indexResult.embeddingAvailable;
         embeddingError = indexResult.embeddingError;
+        embeddingErrorCode = indexResult.embeddingErrorCode;
+        embeddingRetryable = indexResult.embeddingRetryable;
 
         if (embeddingError) {
           log.warn(
-            { err: embeddingError, fonte_id: params.fonteId },
+            {
+              err: embeddingError,
+              embedding_error_code: embeddingErrorCode,
+              fonte_id: params.fonteId,
+            },
             'Embed function failed; chunks persisted without vectors',
           );
         }
@@ -388,12 +643,16 @@ export async function runIngestionPipeline(
       params.orgaoId,
       metadados,
       {
-        stage: 'completed',
+        stage: embeddingAvailable ? 'completed' : 'failed',
         error: embeddingError,
         chunks_indexed: chunksIndexed,
         embedding_available: embeddingAvailable,
       },
-      { status: completionStatus },
+      {
+        status: completionStatus,
+        embedding_error_code: embeddingAvailable ? null : embeddingErrorCode,
+        embedding_retryable: embeddingRetryable,
+      },
     );
 
     log.info(
@@ -403,8 +662,11 @@ export async function runIngestionPipeline(
         status: completionStatus,
         chunks_indexed: chunksIndexed,
         embedding_available: embeddingAvailable,
+        embedding_error_code: embeddingErrorCode,
       },
-      'Ingestion pipeline completed',
+      embeddingAvailable
+        ? 'Ingestion pipeline completed'
+        : 'Ingestion pipeline completed with embedding failure',
     );
 
     return {
@@ -471,24 +733,11 @@ export async function runEmbeddingReprocess(params: {
 
   const row = fonte as FonteReembedRow;
   const metadados = { ...(row.metadados_json ?? {}) };
-  const texto = row.conteudo_texto?.trim() ?? '';
 
-  if (!texto) {
-    throw new Error('Fonte sem texto extraído; use reprocessamento completo.');
-  }
-
-  const filename =
-    typeof metadados.filename === 'string' ? metadados.filename : row.titulo;
-  const anonimizada = metadados.anonimizada === true;
-
-  const { error: deleteError } = await params.supabase
-    .from('chunk')
-    .delete()
-    .eq('fonte_id', params.fonteId)
-    .eq('orgao_id', params.orgaoId);
-
-  if (deleteError) {
-    throw new Error(`Falha ao remover chunks antigos: ${deleteError.message}`);
+  if (metadados.embedding_error_code === 'bad_dim') {
+    throw new Error(
+      'Erro de configuração do modelo de embeddings (dimensão inválida). Reprocessamento indisponível.',
+    );
   }
 
   await updateIngestionJobState(
@@ -501,25 +750,11 @@ export async function runEmbeddingReprocess(params: {
       started_at: new Date().toISOString(),
       error: null,
     },
-    { status: 'processando' satisfies FonteIngestionStatus },
-  );
-
-  const extractionMeta = metadados.extraction;
-  const ocrApplied = Boolean(
-    extractionMeta
-    && typeof extractionMeta === 'object'
-    && (extractionMeta as Record<string, unknown>).ocr_applied === true,
-  );
-
-  const chunks = chunkText({
-    texto,
-    metadados: {
-      fonte_id: params.fonteId,
-      filename,
-      anonimizada,
-      ocr_applied: ocrApplied,
+    {
+      status: 'processando' satisfies FonteIngestionStatus,
+      embedding_error_code: null,
     },
-  });
+  );
 
   await updateIngestionJobState(
     params.supabase,
@@ -529,17 +764,20 @@ export async function runEmbeddingReprocess(params: {
     { stage: 'indexing' },
   );
 
-  const indexResult = await embedAndPersistChunks({
+  const indexResult = await reembedExistingChunks({
     supabase: params.supabase,
     fonteId: params.fonteId,
     orgaoId: params.orgaoId,
-    chunks,
   });
 
   if (indexResult.embeddingError) {
     log.warn(
-      { err: indexResult.embeddingError, fonte_id: params.fonteId },
-      'Re-embed failed; chunks persisted without vectors',
+      {
+        err: indexResult.embeddingError,
+        embedding_error_code: indexResult.embeddingErrorCode,
+        fonte_id: params.fonteId,
+      },
+      'Re-embed failed; existing chunks kept without vectors',
     );
   }
 
@@ -555,12 +793,18 @@ export async function runEmbeddingReprocess(params: {
     params.orgaoId,
     metadados,
     {
-      stage: 'completed',
+      stage: indexResult.embeddingAvailable ? 'completed' : 'failed',
       error: indexResult.embeddingError,
       chunks_indexed: indexResult.chunksIndexed,
       embedding_available: indexResult.embeddingAvailable,
     },
-    { status: completionStatus },
+    {
+      status: completionStatus,
+      embedding_error_code: indexResult.embeddingAvailable
+        ? null
+        : indexResult.embeddingErrorCode,
+      embedding_retryable: indexResult.embeddingRetryable,
+    },
   );
 
   log.info(
@@ -569,8 +813,12 @@ export async function runEmbeddingReprocess(params: {
       fonte_id: params.fonteId,
       status: completionStatus,
       chunks_indexed: indexResult.chunksIndexed,
+      embedding_available: indexResult.embeddingAvailable,
+      embedding_error_code: indexResult.embeddingErrorCode,
     },
-    'Embedding reprocess completed',
+    indexResult.embeddingAvailable
+      ? 'Embedding reprocess completed'
+      : 'Embedding reprocess completed with failures',
   );
 
   return {

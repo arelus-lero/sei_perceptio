@@ -6,6 +6,8 @@ import 'jsr:@supabase/functions-js/edge-runtime.d.ts';
 
 const EMBEDDING_DIMENSIONS = 384;
 const MAX_BATCH_SIZE = 64;
+/** Micro-lote interno: achata pico de CPU/RAM na inferência (evita WORKER_RESOURCE_LIMIT). */
+const EDGE_INTERNAL_BATCH = 4;
 
 const session = new Supabase.ai.Session(Deno.env.get('EMBED_MODEL') ?? 'gte-small');
 
@@ -52,22 +54,9 @@ function isNumberArray(value: unknown): value is number[] {
   );
 }
 
-function assertEmbeddingDimensions(embedding: number[], index: number): void {
-  if (embedding.length !== EMBEDDING_DIMENSIONS) {
-    throw new Error(
-      `Embedding at index ${index} has ${embedding.length} dimensions; expected ${EMBEDDING_DIMENSIONS}.`,
-    );
-  }
-}
-
-async function generateEmbedding(text: string): Promise<number[]> {
-  const result = await session.run(text, embeddingRunOptions);
-
-  if (!isNumberArray(result)) {
-    throw new Error('Model did not return a numeric embedding vector.');
-  }
-
-  return result;
+function isResourceLimitError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /resource|memory|compute|OOM/i.test(message);
 }
 
 Deno.serve(async (req: Request) => {
@@ -112,13 +101,25 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    const embeddings = await Promise.all(
-      texts.map((text) => generateEmbedding(text)),
-    );
+    const embeddings: number[][] = [];
 
-    embeddings.forEach((embedding, index) => {
-      assertEmbeddingDimensions(embedding, index);
-    });
+    for (let i = 0; i < texts.length; i += EDGE_INTERNAL_BATCH) {
+      const slice = texts.slice(i, i + EDGE_INTERNAL_BATCH);
+
+      for (const text of slice) {
+        const result = await session.run(text, embeddingRunOptions);
+
+        if (!isNumberArray(result)) {
+          throw new Error('Model did not return a numeric embedding vector.');
+        }
+
+        if (result.length !== EMBEDDING_DIMENSIONS) {
+          return jsonResponse({ code: 'BAD_DIM' }, 422);
+        }
+
+        embeddings.push(result);
+      }
+    }
 
     return jsonResponse({ embeddings });
   } catch (error) {
@@ -127,6 +128,13 @@ Deno.serve(async (req: Request) => {
       ? error.message
       : 'Internal server error';
 
-    return jsonResponse({ error: message }, 500);
+    if (isResourceLimitError(error)) {
+      return jsonResponse(
+        { code: 'WORKER_RESOURCE_LIMIT', message },
+        546,
+      );
+    }
+
+    return jsonResponse({ code: 'EMBED_FAILED', message }, 500);
   }
 });

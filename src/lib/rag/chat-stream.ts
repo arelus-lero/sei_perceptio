@@ -5,7 +5,15 @@ import {
   type ChatPipelineDeadline,
 } from '@/lib/rag/chat-pipeline-timeout';
 import { streamLlmResponse } from '@/lib/rag/generation';
-import { getLlmTimeoutMs, isLlmFailure, LlmTimeoutError } from '@/lib/rag/llm-errors';
+import {
+  getLlmTimeoutMs,
+  getLlmTtftTimeoutMs,
+  getLlmTimeoutKind,
+  isLlmFailure,
+  LlmTimeoutError,
+  LlmTtftTimeoutError,
+} from '@/lib/rag/llm-errors';
+import { AI_SEAL_MARKDOWN } from '@/lib/rag/prompts/system';
 import type { AppLogger } from '@/lib/logger';
 import type { ConversationTurn, RetrievedChunk } from '@/lib/rag/types';
 
@@ -15,11 +23,21 @@ interface StreamAssistantResponseParams {
   userMessage: string;
   systemPromptOverride?: string;
   deadline?: ChatPipelineDeadline;
+  onPartial?: (partial: boolean) => void;
 }
 
 interface StreamAssistantResponseResult {
   content: string;
   degraded: boolean;
+}
+
+function ensureAiSeal(content: string): { content: string; appended: string | null } {
+  if (content.includes(AI_SEAL_MARKDOWN)) {
+    return { content, appended: null };
+  }
+
+  const seal = `\n\n${AI_SEAL_MARKDOWN}`;
+  return { content: `${content}${seal}`, appended: seal };
 }
 
 export async function streamAssistantResponse(
@@ -28,7 +46,7 @@ export async function streamAssistantResponse(
   log?: AppLogger,
 ): Promise<StreamAssistantResponseResult> {
   try {
-    const llmTimeoutMs = params.deadline
+    const streamTimeoutMs = params.deadline
       ? resolveStageTimeoutMs(params.deadline.remainingMs, getLlmTimeoutMs())
       : getLlmTimeoutMs();
 
@@ -39,34 +57,56 @@ export async function streamAssistantResponse(
         userMessage: params.userMessage,
         systemPromptOverride: params.systemPromptOverride,
       },
-      { timeoutMs: llmTimeoutMs },
+      {
+        streamTimeoutMs,
+        ttftTimeoutMs: getLlmTtftTimeoutMs(),
+        log,
+      },
     );
 
     const reader = llmStream.getReader();
     let content = '';
-    const idleTimeoutMs = llmTimeoutMs;
+    let firstTokenReceived = false;
 
     while (true) {
       if (params.deadline && params.deadline.remainingMs() <= 0) {
-        throw new ChatPipelineTimeoutError('generation', 0);
+        if (!firstTokenReceived) {
+          throw new ChatPipelineTimeoutError('generation', 0);
+        }
+
+        await reader.cancel();
+
+        const sealed = ensureAiSeal(content);
+        if (sealed.appended) {
+          content = sealed.content;
+          onToken(sealed.appended);
+        }
+
+        params.onPartial?.(true);
+        log?.info(
+          {
+            event: 'chat_generation_partial',
+            reason: 'pipeline_deadline_after_first_token',
+          },
+          'Using partial LLM response after pipeline deadline',
+        );
+        break;
       }
 
-      const readResult = await Promise.race([
-        reader.read(),
-        new Promise<never>((_, reject) => {
-          setTimeout(() => {
-            reject(new LlmTimeoutError(`LLM stream idle timeout after ${idleTimeoutMs}ms`));
-          }, idleTimeoutMs);
-        }),
-      ]);
-
-      const { done, value } = readResult;
+      const { done, value } = await reader.read();
       if (done) {
         break;
       }
 
-      content += value;
-      onToken(value);
+      if (value.length > 0) {
+        firstTokenReceived = true;
+        content += value;
+        onToken(value);
+      }
+    }
+
+    if (!firstTokenReceived) {
+      throw new LlmTtftTimeoutError(getLlmTtftTimeoutMs(), getLlmTtftTimeoutMs());
     }
 
     return { content, degraded: false };
@@ -83,6 +123,9 @@ export async function streamAssistantResponse(
       {
         event: 'chat_degraded_mode',
         reason: error instanceof Error ? error.message : 'unknown',
+        timeout_kind: getLlmTimeoutKind(error) ?? null,
+        elapsed_ms: error instanceof LlmTimeoutError ? error.elapsedMs : null,
+        timeout_ms: error instanceof LlmTimeoutError ? error.timeoutMs : null,
       },
       'LLM unavailable, using degraded retrieval mode',
     );

@@ -1,16 +1,35 @@
 import { getEncoding, type Tiktoken } from 'js-tiktoken';
 
-import type { ChunkSourceMetadata, SemanticChunk } from '@/lib/rag/types';
+import type { ChunkSourceMetadata } from '@/lib/rag/types';
 
 export const CHUNK_MAX_TOKENS = 512;
-export const CHUNK_OVERLAP_TOKENS = 200;
+export const OVERLAP_STRUCTURED = 80;
+export const OVERLAP_FALLBACK = 200;
+export const MIN_USEFUL_TOKENS = 20;
 export const ENCODING = 'cl100k_base';
+
+/** @deprecated Use OVERLAP_FALLBACK */
+export const CHUNK_OVERLAP_TOKENS = OVERLAP_FALLBACK;
+
+export interface ChunkMetadata extends ChunkSourceMetadata {
+  posicao_inicio: number;
+  posicao_fim: number;
+}
+
+export interface Chunk {
+  conteudo: string;
+  tokens: number;
+  posicao_inicio: number;
+  posicao_fim: number;
+  metadados: ChunkMetadata;
+}
 
 interface TextUnit {
   text: string;
   start: number;
   end: number;
   tokenCount: number;
+  splitLevel: 'structured' | 'fallback';
 }
 
 interface ChunkingInput {
@@ -63,6 +82,7 @@ function collectSemanticUnits(texto: string, encoding: Tiktoken): TextUnit[] {
         start: trimmedStart,
         end: trimmedStart + trimmedText.length,
         tokenCount: countTokens(trimmedText, encoding),
+        splitLevel: 'structured',
       });
     }
 
@@ -102,6 +122,7 @@ function collectParagraphUnits(
         start,
         end: start + trimmed.length,
         tokenCount,
+        splitLevel: 'structured',
       });
     } else {
       units.push(...collectSentenceUnits(trimmed, start, encoding));
@@ -139,6 +160,7 @@ function collectSentenceUnits(
       start,
       end: start + trimmed.length,
       tokenCount,
+      splitLevel: 'fallback',
     });
 
     searchFrom = relativeIndex >= 0
@@ -153,7 +175,13 @@ function unitsTokenTotal(units: TextUnit[]): number {
   return units.reduce((sum, unit) => sum + unit.tokenCount, 0);
 }
 
-function takeOverlapUnits(units: TextUnit[]): TextUnit[] {
+function resolveOverlapForBuffer(units: TextUnit[]): number {
+  return units.some((unit) => unit.splitLevel === 'fallback')
+    ? OVERLAP_FALLBACK
+    : OVERLAP_STRUCTURED;
+}
+
+function takeOverlapUnits(units: TextUnit[], overlapTokens: number): TextUnit[] {
   const overlap: TextUnit[] = [];
   let tokens = 0;
 
@@ -164,7 +192,7 @@ function takeOverlapUnits(units: TextUnit[]): TextUnit[] {
     }
     overlap.unshift(unit);
     tokens += unit.tokenCount;
-    if (tokens >= CHUNK_OVERLAP_TOKENS) {
+    if (tokens >= overlapTokens) {
       break;
     }
   }
@@ -175,13 +203,16 @@ function takeOverlapUnits(units: TextUnit[]): TextUnit[] {
 function buildChunkFromUnits(
   units: TextUnit[],
   metadados: ChunkSourceMetadata,
-): SemanticChunk {
+  encoding: Tiktoken,
+): Chunk {
   const conteudo = units.map((unit) => unit.text).join('\n\n');
   const posicaoInicio = units[0]?.start ?? 0;
   const posicaoFim = units[units.length - 1]?.end ?? posicaoInicio;
+  const tokens = countTokens(conteudo, encoding);
 
   return {
     conteudo,
+    tokens,
     posicao_inicio: posicaoInicio,
     posicao_fim: posicaoFim,
     metadados: {
@@ -192,7 +223,102 @@ function buildChunkFromUnits(
   };
 }
 
-export function chunkText(input: ChunkingInput): SemanticChunk[] {
+function hardSplitOversizedChunk(
+  chunk: Chunk,
+  encoding: Tiktoken,
+  overlapTokens: number,
+): Chunk[] {
+  const tokenIds = encoding.encode(chunk.conteudo);
+  if (tokenIds.length <= CHUNK_MAX_TOKENS) {
+    return [chunk];
+  }
+
+  const results: Chunk[] = [];
+  let tokenStart = 0;
+
+  while (tokenStart < tokenIds.length) {
+    const tokenEnd = Math.min(tokenStart + CHUNK_MAX_TOKENS, tokenIds.length);
+    const sliceTokens = tokenIds.slice(tokenStart, tokenEnd);
+    const conteudo = encoding.decode(sliceTokens);
+    const localStart = tokenStart === 0
+      ? 0
+      : encoding.decode(tokenIds.slice(0, tokenStart)).length;
+    const posicaoInicio = chunk.posicao_inicio + localStart;
+    const posicaoFim = posicaoInicio + conteudo.length;
+
+    results.push({
+      conteudo,
+      tokens: sliceTokens.length,
+      posicao_inicio: posicaoInicio,
+      posicao_fim: posicaoFim,
+      metadados: {
+        ...chunk.metadados,
+        posicao_inicio: posicaoInicio,
+        posicao_fim: posicaoFim,
+      },
+    });
+
+    if (tokenEnd >= tokenIds.length) {
+      break;
+    }
+
+    tokenStart = Math.max(tokenStart + 1, tokenEnd - overlapTokens);
+  }
+
+  return results;
+}
+
+function enforceMaxTokenLimit(chunks: Chunk[], encoding: Tiktoken): Chunk[] {
+  const validated: Chunk[] = [];
+
+  for (const chunk of chunks) {
+    const actualTokens = countTokens(chunk.conteudo, encoding);
+    const normalized: Chunk = actualTokens === chunk.tokens
+      ? chunk
+      : { ...chunk, tokens: actualTokens };
+
+    if (normalized.tokens <= CHUNK_MAX_TOKENS) {
+      validated.push(normalized);
+      continue;
+    }
+
+    validated.push(
+      ...hardSplitOversizedChunk(normalized, encoding, OVERLAP_FALLBACK),
+    );
+  }
+
+  const final: Chunk[] = [];
+
+  for (const chunk of validated) {
+    const tokens = countTokens(chunk.conteudo, encoding);
+    if (tokens <= CHUNK_MAX_TOKENS) {
+      final.push({ ...chunk, tokens });
+      continue;
+    }
+
+    final.push(
+      ...hardSplitOversizedChunk(
+        { ...chunk, tokens },
+        encoding,
+        OVERLAP_FALLBACK,
+      ),
+    );
+  }
+
+  return final;
+}
+
+function discardDegenerateChunks(chunks: Chunk[], encoding: Tiktoken): Chunk[] {
+  return chunks.filter((chunk) => {
+    const tokens = countTokens(chunk.conteudo, encoding);
+    return tokens >= MIN_USEFUL_TOKENS;
+  }).map((chunk) => ({
+    ...chunk,
+    tokens: countTokens(chunk.conteudo, encoding),
+  }));
+}
+
+export function chunkText(input: ChunkingInput): Chunk[] {
   const texto = input.texto.trim();
   if (!texto) {
     return [];
@@ -202,8 +328,9 @@ export function chunkText(input: ChunkingInput): SemanticChunk[] {
   const units = collectSemanticUnits(texto, encoding);
 
   if (units.length === 0) {
-    return [{
+    const singleChunk: Chunk = {
       conteudo: texto,
+      tokens: countTokens(texto, encoding),
       posicao_inicio: 0,
       posicao_fim: texto.length,
       metadados: {
@@ -211,10 +338,15 @@ export function chunkText(input: ChunkingInput): SemanticChunk[] {
         posicao_inicio: 0,
         posicao_fim: texto.length,
       },
-    }];
+    };
+
+    return discardDegenerateChunks(
+      enforceMaxTokenLimit([singleChunk], encoding),
+      encoding,
+    );
   }
 
-  const chunks: SemanticChunk[] = [];
+  const rawChunks: Chunk[] = [];
   let buffer: TextUnit[] = [];
   let index = 0;
 
@@ -232,20 +364,23 @@ export function chunkText(input: ChunkingInput): SemanticChunk[] {
       continue;
     }
 
-    chunks.push(buildChunkFromUnits(buffer, input.metadados));
-    buffer = takeOverlapUnits(buffer);
+    rawChunks.push(buildChunkFromUnits(buffer, input.metadados, encoding));
+    buffer = takeOverlapUnits(buffer, resolveOverlapForBuffer(buffer));
   }
 
   if (buffer.length > 0) {
-    chunks.push(buildChunkFromUnits(buffer, input.metadados));
+    rawChunks.push(buildChunkFromUnits(buffer, input.metadados, encoding));
   }
 
-  return chunks;
+  return discardDegenerateChunks(
+    enforceMaxTokenLimit(rawChunks, encoding),
+    encoding,
+  );
 }
 
 export function chunkTextSimple(
   texto: string,
   metadados: ChunkSourceMetadata,
-): SemanticChunk[] {
+): Chunk[] {
   return chunkText({ texto, metadados });
 }

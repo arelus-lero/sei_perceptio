@@ -3,7 +3,7 @@ import {
   DEGRADED_MODE_WARNING,
   streamDegradedResponse,
 } from '@/lib/rag/degraded-mode';
-import { isLlmFailure, LlmTimeoutError } from '@/lib/rag/llm-errors';
+import { isLlmFailure, LlmTtftTimeoutError } from '@/lib/rag/llm-errors';
 import type { RetrievedChunk } from '@/lib/rag/types';
 
 function assert(condition: boolean, message: string): void {
@@ -34,7 +34,7 @@ async function runInvariants(): Promise<void> {
 
   assert(content.includes(DEGRADED_MODE_WARNING), 'conteúdo degradado deve incluir aviso');
   assert(content.includes('Trechos recuperados'), 'conteúdo degradado deve listar trechos');
-  assert(isLlmFailure(new LlmTimeoutError()), 'timeout deve ser falha de LLM');
+  assert(isLlmFailure(new LlmTtftTimeoutError(5_000, 5_000)), 'timeout deve ser falha de LLM');
 
   const stream = streamDegradedResponse(sampleChunks);
   const reader = stream.getReader();

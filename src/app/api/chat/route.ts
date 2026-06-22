@@ -373,6 +373,11 @@ export async function POST(request: NextRequest) {
               userMessage: sanitizedPrompt.clean,
               systemPromptOverride,
               deadline: pipelineDeadline,
+              onPartial: (partial) => {
+                if (partial) {
+                  enqueueEvent({ type: 'partial', value: true });
+                }
+              },
             },
             (token) => {
               assistantContent += token;
